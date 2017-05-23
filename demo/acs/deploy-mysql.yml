@@ -1,0 +1,127 @@
+#ensure teh storage class for Azure-disk is present
+apiVersion: storage.k8s.io/v1beta1
+kind: StorageClass
+metadata:
+  name: slow
+provisioner: kubernetes.io/azure-disk
+parameters:
+  skuName: Standard_LRS
+---
+#create a persistent volume claim
+apiVersion: "v1"
+kind: "PersistentVolumeClaim"
+metadata:
+  #this is referenced in the mysql deployment for the database volume
+  name: "mysql-lamp-pv"
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "slow"
+spec:
+  accessModes:
+    - "ReadWriteOnce"
+  resources:
+    requests:
+      storage: "1Gi"
+---
+
+#deploy the MYSQL Container
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: mysql-lamp-deployment
+  labels:
+    app: mysql-lamp
+spec:
+  # number of MySQL pods (replicas) to run
+  replicas: 1 
+  # The number of old deployments you want to keep around
+  revisionHistoryLimit: 5
+  # make replicas of kubernetes objects with the label app: mysql
+  selector:
+    matchLabels:
+      app: mysql-lamp
+  # the pod template describes what type of pod to create
+  # when the defined number of replicas are not up
+  # in this case, the pod that will be created is the one labeled app: mysql-lamp
+  template: 
+    metadata:
+      labels:
+        app: mysql-lamp
+    spec:
+      containers:
+      - name: mysql
+        image: mysql
+        # reserving resources from our cluster
+        resources:
+          requests:
+            cpu: 1
+            memory: 2Gi
+        # env sets environment variables in the container
+        # exactly like environment variables set from the command line
+        env:
+          # The MySQL image will configure a root password with the value of MYSQL_ROOT_PASSWORD...
+          - name: MYSQL_ROOT_PASSWORD
+            valueFrom:
+              # rather than embed sensitive details in this config
+              # we reference another Kubernetes object
+              # in this case, the Secret with the name: mysql-credentials
+              secretKeyRef:
+                name: mysql-credentials
+                # references the rootpw key-value pair from the mysql-credentials Secret
+                key: rootpw
+          # ... an initial non-root user with a username of the value of MYSQL_USER ...
+          - name: MYSQL_USER
+            valueFrom:
+              secretKeyRef:
+                name: mysql-credentials
+                key: user
+          # ... and a password of the value of MYSQL_PASSWORD ...
+          - name: MYSQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: mysql-credentials
+                key: password
+          # ... and an initial database named sakila - https://dev.mysql.com/doc/sakila/en/sakila-introduction.html
+          # with the value of MYSQL_DATABASE (while granting MYSQL_USER superuser access.)
+          - name: MYSQL_DATABASE
+            value: sakila
+        # https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-probes/
+        livenessProbe:
+          tcpSocket:
+            port: 3306
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - mountPath: /var/lib/mysql 
+          name: mysql-home
+        args:
+          - "--ignore-db-dir"
+          - "lost+found"
+      volumes:
+      - name: mysql-home
+        persistentVolumeClaim:
+          claimName: mysql-lamp-pv
+
+---
+# expose a pod on mysql.default.svc.cluster.local to the rest of the cluster
+
+apiVersion: v1
+# https://kubernetes.io/docs/concepts/services-networking/service/
+kind: Service
+metadata:
+  # the name mysql here means you can reference the pod
+  # using the host mysql-lamp.default.svc.cluster.local from within the cluster
+  name: mysql-lamp
+  labels:
+    app: lamp
+spec:
+  # allows us to set our own internal IP to reference this pod
+  # in this case we care about the port
+  # https://kubernetes.io/docs/concepts/services-networking/service/#choosing-your-own-ip-address
+  type: ClusterIP
+  ports:
+  # make the service available on this port within the cluster
+  - port: 3306
+    protocol: TCP
+  # apply this service to the pod with the label app: mysql
+  selector:
+    app: mysql-lamp
